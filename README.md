@@ -12,19 +12,6 @@ backend/          <- server code (deployed to Render, Root Directory = backend)
 README.md
 ```
 
-Delete the old `style.css`, `app.js` and `config.js` from the repo root; they are no longer used.
-
-## Updating an existing deployment (do these in order)
-
-1. **Supabase → SQL Editor:** paste all of `backend/schema.sql` and Run. It is safe to re-run and only adds what is missing
-   (accounts, DMs, replies, reactions, pins, mutes).
-2. **GitHub:** upload the new `index.html` (root) and the `backend/` files, replacing the old ones.
-3. **Render:** it redeploys automatically. Environment variables you already have keep working. New optional ones:
-   `ADMIN2_USERNAME` + `ADMIN2_PASSWORD` (second admin), `MAX_STORED_MESSAGES_PER_ROOM` (default 100).
-4. Hard-refresh the site (Ctrl+Shift+R).
-
-If your backend URL is not `https://terminalchat-gsel.onrender.com`, change `PRODUCTION_BACKEND` near the top of the `<script>` in `index.html`.
-To release a new version, change `APP_VERSION` on the line above it.
 
 ## Features
 
