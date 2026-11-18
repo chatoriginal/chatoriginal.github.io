@@ -712,8 +712,84 @@ function findOnline(token) {
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// Web Push: real OS notifications (Windows / macOS / Android / iOS home-screen app), delivered even
+// when the tab is in the background or closed. Keys are generated once and kept in Supabase.
+// ---------------------------------------------------------------------------
+
+let webpush = null;
+let vapidPublic = '';
+// Only real browser push services are accepted as destinations (stops the server being aimed at other URLs).
+const PUSH_HOSTS = ['googleapis.com', 'push.services.mozilla.com', 'push.apple.com', 'notify.windows.com'];
+const PUSH_KINDS = new Set(['dm', 'mention', 'reply']);
+
+function validPushEndpoint(raw) {
+  if (typeof raw !== 'string' || raw.length > 600) return false;
+  let u;
+  try { u = new URL(raw); } catch { return false; }
+  if (u.protocol !== 'https:' || u.username || u.password || u.port) return false;
+  return PUSH_HOSTS.some((h) => u.hostname === h || u.hostname.endsWith('.' + h));
+}
+
+async function initPush() {
+  try {
+    webpush = require('web-push');
+  } catch {
+    console.warn('[push] the "web-push" package is not installed; push notifications are OFF.');
+    return;
+  }
+  let pub = process.env.VAPID_PUBLIC_KEY;
+  let priv = process.env.VAPID_PRIVATE_KEY;
+  if (!pub || !priv) {
+    pub = await db.getSetting('vapid_public');
+    priv = await db.getSetting('vapid_private');
+    if (!pub || !priv) {
+      const k = webpush.generateVAPIDKeys();
+      pub = k.publicKey;
+      priv = k.privateKey;
+      await db.setSetting('vapid_public', pub);
+      await db.setSetting('vapid_private', priv);
+      console.log('[push] generated new push keys');
+    }
+  }
+  const subject = ALLOWED_ORIGINS.find((o) => o.startsWith('https://')) || 'mailto:admin@example.com';
+  webpush.setVapidDetails(subject, pub, priv);
+  vapidPublic = pub;
+}
+
+function pushPayload(p) {
+  const who = p.from || 'Someone';
+  const title = p.kind === 'dm' ? `${who} sent you a message`
+    : p.kind === 'mention' ? `${who} mentioned you in #${p.roomName || 'chat'}`
+    : `${who} replied to you in #${p.roomName || 'chat'}`;
+  return { title, body: p.snippet || '', tag: `tc-${p.messageId}`, scope: p.scope, roomId: p.roomId || null, from: p.fromUsername || null };
+}
+
+async function sendPush(lower, payload) {
+  if (!webpush) return;
+  let subs;
+  try { subs = await db.listPushSubs(lower); } catch (err) { console.error('[push]', err.message); return; }
+  if (!subs.length) return;
+  const body = JSON.stringify(pushPayload(payload));
+  for (const sub of subs) {
+    webpush
+      .sendNotification({ endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } }, body, { TTL: 3600, urgency: 'high' })
+      .catch((err) => {
+        if (err && (err.statusCode === 404 || err.statusCode === 410)) db.removePushSub(sub.endpoint).catch(() => {});
+        else console.error('[push] send failed:', err && (err.statusCode || err.message));
+      });
+  }
+}
+
 function notify(lower, payload) {
   io.to(userKey(lower)).emit('notify', { ts: Date.now(), ...payload });
+  if (PUSH_KINDS.has(payload.kind)) sendPush(lower, payload);
+}
+
+/** Is this username a real account (member or admin)? Used so offline people still get push for @mentions. */
+async function isAccount(lower) {
+  if (isAdminName(lower)) return true;
+  try { return !!(await directory.get(lower)); } catch { return false; }
 }
 
 async function deliverMessage(row, sender) {
@@ -741,10 +817,15 @@ async function deliverMessage(row, sender) {
   // @mentions
   for (const token of extractMentions(row.content)) {
     const target = findOnline(token);
-    if (!target) continue;
-    const lower = target.username.toLowerCase();
+    let lower;
+    if (target) {
+      lower = target.username.toLowerCase();
+      if (target.role === 'guest' && (!room || room.name !== GUEST_ROOM)) continue;
+    } else {
+      lower = token.toLowerCase();
+      if (!(await isAccount(lower))) continue; // offline members still get a push notification
+    }
     if (told.has(lower)) continue;
-    if (target.role === 'guest' && (!room || room.name !== GUEST_ROOM)) continue;
     told.add(lower);
     notify(lower, { ...base, kind: 'mention' });
   }
@@ -752,7 +833,8 @@ async function deliverMessage(row, sender) {
   if (msg.replyTo && !msg.replyTo.deleted) {
     const lower = msg.replyTo.username.toLowerCase();
     const target = sessions.get(lower);
-    if (!told.has(lower) && target && target.socketId && !(target.role === 'guest' && (!room || room.name !== GUEST_ROOM))) {
+    const reachable = target && target.socketId ? !(target.role === 'guest' && (!room || room.name !== GUEST_ROOM)) : await isAccount(lower);
+    if (!told.has(lower) && reachable) {
       told.add(lower);
       notify(lower, { ...base, kind: 'reply' });
     }
@@ -1280,6 +1362,32 @@ io.on('connection', (socket) => {
     return buildSession(s, resume, { adminToken: token });
   });
 
+  // ===== push notifications =====
+
+  on(socket, 'push:key', 'member', async () => ({ ok: true, key: vapidPublic || null }));
+
+  on(socket, 'push:subscribe', 'member', async (payload, s) => {
+    const { endpoint, keys } = reqObject(payload);
+    if (!webpush) throw new UserError('Push notifications are not available on this server.');
+    const b64 = /^[A-Za-z0-9_-]{16,200}$/;
+    if (!validPushEndpoint(endpoint) || !keys || typeof keys !== 'object' || !b64.test(keys.p256dh) || !b64.test(keys.auth)) {
+      throw new UserError('Invalid push subscription.');
+    }
+    const lower = s.data.username.toLowerCase();
+    const existing = await db.listPushSubs(lower);
+    if (existing.length >= 10 && !existing.some((e) => e.endpoint === endpoint)) {
+      throw new UserError('You have too many devices registered for notifications.');
+    }
+    await db.savePushSub({ endpoint, usernameLower: lower, p256dh: keys.p256dh, auth: keys.auth });
+    return { ok: true };
+  });
+
+  on(socket, 'push:unsubscribe', 'member', async (payload) => {
+    const { endpoint } = reqObject(payload);
+    if (typeof endpoint === 'string' && endpoint.length <= 600) await db.removePushSub(endpoint);
+    return { ok: true };
+  });
+
   // ===== profiles =====
 
   on(socket, 'profile:get', 'user', async (payload) => {
@@ -1713,6 +1821,12 @@ async function main() {
     ]);
   }
   try {
+    await initPush();
+  } catch (err) {
+    webpush = null;
+    console.warn(`[push] disabled: ${err.message}`);
+  }
+  try {
     await db.ensureBucket(MAX_UPLOAD_BYTES);
     uploadsReady = true;
   } catch (err) {
@@ -1721,7 +1835,7 @@ async function main() {
   }
   server.listen(PORT, () => {
     console.log(`TerminalChat v${APP_VERSION} backend listening on port ${PORT}`);
-    console.log(`Admin accounts: ${ADMIN_NAMES.length}; file uploads: ${uploadsReady ? `on (max ${MAX_UPLOAD_MB} MB)` : 'OFF'}`);
+    console.log(`Admin accounts: ${ADMIN_NAMES.length}; file uploads: ${uploadsReady ? `on (max ${MAX_UPLOAD_MB} MB)` : 'OFF'}; push: ${webpush ? 'on' : 'OFF'}`);
     console.log(`Allowed origins: ${ALLOWED_ORIGINS.join(', ')}`);
     console.log(`Loaded ${rooms.rooms.size} room(s), ${bans.length} ban(s), ${mutes.size} mute(s). Rooms keep ${MAX_STORED_MESSAGES_PER_ROOM} messages.`);
   });
