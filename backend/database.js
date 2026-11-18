@@ -53,6 +53,8 @@ function createDatabase({ url, serviceRoleKey, bucket = 'attachments' }) {
         ['users', 'id, username_lower, display_lower, password_hash, bio'],
         ['dm_threads', 'user_a, user_b, updated_at, last_sender, read_a, read_b'],
         ['mutes', 'username_lower, until'],
+        ['push_subscriptions', 'endpoint, username_lower, p256dh, auth'],
+        ['app_settings', 'key, value'],
       ];
       for (const [table, cols] of checks) {
         const { error } = await sb.from(table).select(cols).limit(1);
@@ -472,6 +474,36 @@ function createDatabase({ url, serviceRoleKey, bucket = 'attachments' }) {
     async removeMute(usernameLower) {
       const { error } = await sb.from('mutes').delete().eq('username_lower', usernameLower);
       if (error) fail('removeMute', error);
+    },
+
+    // ---------- settings + push subscriptions ----------
+    async getSetting(key) {
+      const { data, error } = await sb.from('app_settings').select('value').eq('key', key).maybeSingle();
+      if (error) fail('getSetting', error);
+      return data ? data.value : null;
+    },
+
+    async setSetting(key, value) {
+      const { error } = await sb.from('app_settings').upsert({ key, value }, { onConflict: 'key' });
+      if (error) fail('setSetting', error);
+    },
+
+    async savePushSub({ endpoint, usernameLower, p256dh, auth }) {
+      const { error } = await sb
+        .from('push_subscriptions')
+        .upsert({ endpoint, username_lower: usernameLower, p256dh, auth }, { onConflict: 'endpoint' });
+      if (error) fail('savePushSub', error);
+    },
+
+    async removePushSub(endpoint) {
+      const { error } = await sb.from('push_subscriptions').delete().eq('endpoint', endpoint);
+      if (error) fail('removePushSub', error);
+    },
+
+    async listPushSubs(usernameLower) {
+      const { data, error } = await sb.from('push_subscriptions').select('endpoint, p256dh, auth').eq('username_lower', usernameLower).limit(10);
+      if (error) fail('listPushSubs', error);
+      return data;
     },
   };
 }
