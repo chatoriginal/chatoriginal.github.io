@@ -6,8 +6,10 @@
 <title>TerminalChat</title>
 <meta name="description" content="TerminalChat — a public, IRC-inspired chat network.">
 <meta name="theme-color" content="#131417">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
 <!-- This page is ONE file (HTML + CSS + JS), so inline script/style must be allowed. Everything else is locked down. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'unsafe-inline'; img-src 'self' data: blob: https:; connect-src https: wss: http://localhost:* ws://localhost:* http://127.0.0.1:* ws://127.0.0.1:*; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'unsafe-inline'; img-src 'self' data: blob: https:; connect-src https: wss: http://localhost:* ws://localhost:* http://127.0.0.1:* ws://127.0.0.1:*; worker-src 'self'; manifest-src blob:; base-uri 'none'; form-action 'none'">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%235b63f0'/%3E%3Cpath d='M9 11l6 5-6 5' fill='none' stroke='white' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M17 21h6' stroke='white' stroke-width='2.6' stroke-linecap='round'/%3E%3C/svg%3E">
 <style>
 :root{--bg0:#131417;--bg1:#1a1b1f;--bg2:#212227;--bg3:#292b31;--bg4:#32343b;--line:#2f3137;--text:#e7e8ec;--text2:#b4b6bf;--muted:#8b8d97;--accent:#6b74ff;--accent2:#9a6bff;--soft:rgba(107,116,255,.15);--good:#3ecf8e;--warn:#f2b84b;--bad:#ff6270;--r:12px;--font:Inter,"Segoe UI",system-ui,-apple-system,Arial,sans-serif;--mono:ui-monospace,"SF Mono","Cascadia Code",Menlo,Consolas,monospace}
@@ -115,6 +117,11 @@ textarea.input{resize:vertical;min-height:70px}
 .composer{display:flex;gap:8px;align-items:flex-end;background:var(--bg2);border:1px solid var(--line);border-radius:12px;padding:6px}
 .composer.joined{border-radius:0 0 12px 12px}
 .composer textarea{flex:1;background:none;border:0;outline:0;resize:none;max-height:160px;padding:6px 8px;line-height:1.4}
+.cwrap{position:relative}
+.mpop{position:absolute;left:0;right:0;bottom:calc(100% + 6px);max-width:360px;background:var(--bg2);border:1px solid var(--line);border-radius:12px;padding:4px;box-shadow:0 16px 40px -10px #000;z-index:30;max-height:260px;overflow:auto}
+.mpop button{display:flex;align-items:center;gap:8px;width:100%;text-align:left;background:none;border:0;border-radius:8px;padding:7px 10px}
+.mpop button.sel,.mpop button:hover{background:var(--soft)}
+.mpop small{color:var(--muted);margin-left:auto}
 .members{background:var(--bg1);border-left:1px solid var(--line);overflow:auto;padding:8px}
 .members .item{padding:5px 8px}
 .dot{width:8px;height:8px;border-radius:50%;background:var(--good);flex:none}
@@ -223,12 +230,13 @@ textarea.input{resize:vertical;min-height:70px}
       <div id="typing"></div>
       <div id="reply-bar" class="bar hidden"><span id="reply-text"></span><button class="iconbtn" id="reply-x" title="Cancel reply">✕</button></div>
       <div id="attach-bar" class="bar hidden"><span id="attach-text"></span><button class="iconbtn" id="attach-x" title="Remove file">✕</button></div>
+      <div class="cwrap"><div id="mpop" class="mpop hidden" role="listbox" aria-label="Mention suggestions"></div>
       <div class="composer" id="composer">
         <button class="iconbtn" id="btn-attach" title="Attach an image or file">📎</button>
         <input type="file" id="file-input" class="hidden">
         <textarea id="input" rows="1" placeholder="Message… (Enter to send, Shift+Enter for a new line)"></textarea>
         <button class="btn btn-primary" id="btn-send">Send</button>
-      </div>
+      </div></div>
     </div>
   </section>
 
@@ -243,7 +251,7 @@ textarea.input{resize:vertical;min-height:70px}
 /* =====================================================================
    SETTINGS — the only two lines you normally need to edit
    ===================================================================== */
-const APP_VERSION = '1.0.1';                       // MAJOR.MINOR.PATCH — change this line to release a new version
+const APP_VERSION = '1.0.0';                       // MAJOR.MINOR.PATCH — change this line to release a new version
 const PRODUCTION_BACKEND = 'https://terminalchat-gsel.onrender.com'; // your Render URL, no trailing slash
 const BACKEND_URL = /^(localhost|127\.0\.0\.1)$/.test(location.hostname) ? 'http://localhost:3000' : PRODUCTION_BACKEND;
 
@@ -460,18 +468,76 @@ async function enterChat(r) {
   const want = (prev && prev.type === 'room' && S.rooms.find((x) => x.id === prev.id)) ||
     S.rooms.find((x) => x.name === 'general') || S.rooms[0];
   if (want) await joinRoom(want.id); else { S.view = null; $('#title').textContent = 'No rooms'; }
+  consumeOpenHash();
+  syncPush();
   if ('Notification' in window && Notification.permission === 'default' && !sessionStorage.getItem('tc_asked_notif')) {
     sessionStorage.setItem('tc_asked_notif', '1');
-    toast('Enable notifications?', 'Click here to get alerts for @mentions, replies and DMs.', 'good', askNotifications);
+    toast('Turn on notifications?', 'Click here to get Windows / phone notifications for @mentions, replies and DMs.', 'good', enableNotifications);
   }
 }
 
-function askNotifications() {
-  if (!('Notification' in window)) return toast('Not supported', 'This browser does not support notifications.', 'warn');
-  Notification.requestPermission().then((p) => toast(p === 'granted' ? 'Notifications on' : 'Notifications blocked', p === 'granted' ? 'You will be alerted for mentions, replies and DMs.' : 'Allow them in your browser\'s site settings to turn them on.', p === 'granted' ? 'good' : 'warn'));
+/* ----- OS notifications (Windows / Android / iOS home-screen app) ----- */
+let swReg = null;
+const pushSupported = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+const b64ToBytes = (b64) => { const p = '='.repeat((4 - (b64.length % 4)) % 4); const raw = atob((b64 + p).replace(/-/g, '+').replace(/_/g, '/')); return Uint8Array.from(raw, (c) => c.charCodeAt(0)); };
+
+async function registerWorker() {
+  if (!('serviceWorker' in navigator)) return;
+  try { swReg = await navigator.serviceWorker.register('sw.js'); } catch (e) { console.warn('service worker failed', e); }
+  navigator.serviceWorker.addEventListener('message', (e) => { if (e.data && e.data.type === 'open') openFromNotification(e.data); });
+}
+function openFromNotification(d) {
+  if (d.scope === 'dm' && d.from) openDm(d.from);
+  else if (d.roomId) joinRoom(d.roomId);
+}
+function consumeOpenHash() {
+  const m = /^#(dm|room)=(.+)$/.exec(location.hash);
+  if (!m) return;
+  history.replaceState(null, '', location.pathname + location.search);
+  const v = decodeURIComponent(m[2]);
+  if (m[1] === 'dm') openDm(v); else joinRoom(v);
+}
+
+/** Subscribes this browser to push and tells the server. Members/admins only (guests have no inbox). */
+async function syncPush() {
+  if (!pushSupported() || !S.me || S.me.role === 'guest' || Notification.permission !== 'granted') return false;
+  try {
+    const reg = swReg || (await navigator.serviceWorker.ready);
+    const k = await emit('push:key', {});
+    if (!k.ok || !k.key) return false;
+    const sub = (await reg.pushManager.getSubscription()) || (await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64ToBytes(k.key) }));
+    const r = await emit('push:subscribe', sub.toJSON());
+    return !!r.ok;
+  } catch (e) { console.warn('push subscribe failed', e); return false; }
+}
+async function dropPush() {
+  try {
+    const reg = swReg || (await navigator.serviceWorker.getRegistration());
+    const sub = reg && (await reg.pushManager.getSubscription());
+    if (sub) { await emit('push:unsubscribe', { endpoint: sub.endpoint }); await sub.unsubscribe(); }
+  } catch { /* ignore */ }
+}
+
+async function enableNotifications() {
+  if (!('Notification' in window)) return toast('Not supported', 'This browser does not support notifications. On iPhone/iPad, add this site to your Home Screen first (Share → Add to Home Screen).', 'warn');
+  const p = await Notification.requestPermission();
+  if (p !== 'granted') return toast('Notifications blocked', 'Allow notifications for this site in your browser settings, then try again.', 'warn');
+  const ok = await syncPush();
+  await osNotify('Notifications are on', ok ? 'You will get alerts for @mentions, replies and DMs, even when this tab is closed.' : 'You will get alerts while this page is open.', 'tc-welcome', {});
+}
+
+/** Shows a real operating-system notification. Returns false if notifications are not allowed. */
+async function osNotify(title, body, tag, data) {
+  if (!('Notification' in window) || Notification.permission !== 'granted') return false;
+  try {
+    const reg = swReg || (navigator.serviceWorker && (await navigator.serviceWorker.getRegistration()));
+    if (reg) { await reg.showNotification(title, { body, tag, data }); return true; }
+  } catch { /* fall through */ }
+  try { const n = new Notification(title, { body, tag }); n.onclick = () => { window.focus(); openFromNotification(data || {}); n.close(); }; return true; } catch { return false; }
 }
 
 async function logout() {
+  if (S.me && S.me.role !== 'guest') await dropPush();
   await emit('session:end', {});
   store.clear(); S.me = null; S.view = null; S.msgs.clear();
   $('#msgs').replaceChildren();
@@ -744,16 +810,75 @@ $('#input').addEventListener('paste', (e) => { const f = [...(e.clipboardData ? 
 document.addEventListener('dragover', (e) => e.preventDefault());
 document.addEventListener('drop', (e) => { e.preventDefault(); if (S.me && S.maxUpload && e.dataTransfer.files[0]) setAttachment(e.dataTransfer.files[0]); });
 
+/* ----- @mention autocomplete: type @ and pick a person ----- */
+const mention = { items: [], sel: 0, start: 0 };
+function mentionCandidates() {
+  const seen = new Map();
+  const add = (username, displayName, isAdmin, tag) => {
+    const k = username.toLowerCase();
+    if (!S.me || k === S.me.username.toLowerCase() || username === 'System' || seen.has(k)) return;
+    seen.set(k, { username, displayName: displayName || username, isAdmin: !!isAdmin, tag });
+  };
+  if (S.view && S.view.type === 'dm') add(S.view.with, S.view.displayName, false, '');
+  else {
+    for (const u of S.users) add(u.username, u.displayName, u.isAdmin, 'here');
+    for (const { msg } of S.msgs.values()) if (msg.kind !== 'system') add(msg.username, msg.displayName, msg.isAdmin, ''); // people who spoke recently
+  }
+  return [...seen.values()];
+}
+function closeMention() { mention.items = []; $('#mpop').classList.add('hidden'); }
+function updateMention() {
+  const pos = input.selectionStart;
+  const m = /(^|\s)@([A-Za-z0-9_-]{0,20})$/.exec(input.value.slice(0, pos));
+  if (!m || !S.view) return closeMention();
+  const q = m[2].toLowerCase();
+  mention.start = pos - m[2].length - 1;
+  mention.items = mentionCandidates()
+    .filter((c) => c.username.toLowerCase().startsWith(q) || c.displayName.toLowerCase().includes(q))
+    .sort((a, b) => (b.tag === 'here') - (a.tag === 'here') || a.username.localeCompare(b.username)).slice(0, 8);
+  if (!mention.items.length) return closeMention();
+  mention.sel = Math.min(mention.sel, mention.items.length - 1);
+  const box = $('#mpop'); box.replaceChildren();
+  mention.items.forEach((c, i) => box.append(h('button', { type: 'button', role: 'option', class: i === mention.sel ? 'sel' : '',
+    onmousedown: (e) => { e.preventDefault(); pickMention(i); } },
+    h('b', { text: c.displayName }), c.displayName !== c.username ? h('span', { class: 'hint', text: '@' + c.username }) : null, c.isAdmin ? h('span', { class: 'tag', text: 'ADMIN' }) : c.tag === 'here' ? h('small', { text: 'in room' }) : null)));
+  box.classList.remove('hidden');
+}
+function pickMention(i) {
+  const c = mention.items[i]; if (!c) return;
+  const pos = input.selectionStart;
+  input.value = input.value.slice(0, mention.start) + '@' + c.username + ' ' + input.value.slice(pos);
+  const caret = mention.start + c.username.length + 2;
+  input.setSelectionRange(caret, caret);
+  closeMention(); autosize(); input.focus();
+}
+/** Returns true if the key was used by the suggestion list. */
+function mentionKey(e) {
+  if (!mention.items.length || $('#mpop').classList.contains('hidden')) return false;
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    mention.sel = (mention.sel + (e.key === 'ArrowDown' ? 1 : -1) + mention.items.length) % mention.items.length;
+    updateMention(); return true;
+  }
+  if ((e.key === 'Enter' && !e.shiftKey) || e.key === 'Tab') { e.preventDefault(); pickMention(mention.sel); return true; }
+  if (e.key === 'Escape') { e.preventDefault(); closeMention(); return true; }
+  return false;
+}
+
 const input = $('#input');
 function autosize() { input.style.height = 'auto'; input.style.height = Math.min(input.scrollHeight, 160) + 'px'; }
 let lastTypingSent = 0;
+input.addEventListener('click', updateMention);
+input.addEventListener('blur', () => setTimeout(closeMention, 100));
 input.addEventListener('input', () => {
   autosize();
+  mention.sel = 0; updateMention();
   if (!S.view || !input.value.trim() || input.value.trim()[0] === '.' || input.value.trim()[0] === '/') return;
   const now = Date.now();
   if (now - lastTypingSent > 3000) { lastTypingSent = now; emit('typing', S.view.type === 'room' ? { scope: 'room' } : { scope: 'dm', to: S.view.with }); }
 });
 input.addEventListener('keydown', (e) => {
+  if (mentionKey(e)) return;
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
   else if (e.key === 'Escape' && S.replyTo) { S.replyTo = null; updateBars(); }
 });
@@ -910,9 +1035,11 @@ function showSettings() {
     body.append(h('p', { class: 'hint', text: S.me.role === 'guest' ? 'You are a guest. Create an account to get a profile, DMs and more rooms.' : 'Administrator profile.' }));
   }
   const perm = 'Notification' in window ? Notification.permission : 'unsupported';
+  const permText = { granted: 'ON', denied: 'BLOCKED (allow them in your browser\'s site settings)', default: 'not enabled yet', unsupported: 'not supported here' }[perm];
   body.append(h('hr', { style: 'border:0;border-top:1px solid var(--line);margin:16px 0' }), h('b', { text: 'Notifications' }),
-    h('p', { class: 'hint', text: `Browser notifications: ${perm}. You always get in-app alerts for @mentions, replies and DMs.` }),
-    h('div', { class: 'row' }, h('button', { class: 'btn', text: 'Enable browser notifications', onclick: askNotifications }),
+    h('p', { class: 'hint', text: `Windows / phone notifications: ${permText}. ${S.me.role === 'guest' ? 'Guests only get them while this page is open.' : 'Members get them even when the tab is closed.'} iPhone/iPad: tap Share → Add to Home Screen, open the app from there, then enable.` }),
+    h('div', { class: 'row' }, h('button', { class: 'btn btn-primary', text: perm === 'granted' ? 'Re-register this device' : 'Enable notifications', onclick: enableNotifications }),
+      perm === 'granted' ? h('button', { class: 'btn', text: 'Send test', onclick: () => osNotify('Test notification', 'If you can see this, notifications work.', 'tc-test', {}).then((ok) => !ok && toast('Not shown', 'Notifications are not allowed.', 'warn')) }) : null,
       h('button', { class: 'btn btn-danger', text: 'Log out', onclick: () => { closeModal(); logout(); } })));
   modal('Settings', body);
 }
@@ -965,25 +1092,23 @@ function notifyText(n) {
   if (n.kind === 'announce') return ['📣 System Message', n.text];
   return ['TerminalChat', n.text || ''];
 }
-function onNotify(n) {
+async function onNotify(n) {
   if (!S.me) return;
-  const viewingIt = n.scope === 'dm' && S.view && S.view.type === 'dm' && S.view.with.toLowerCase() === (n.fromUsername || '').toLowerCase();
+  const focused = windowFocused();
+  const viewingDm = n.scope === 'dm' && S.view && S.view.type === 'dm' && S.view.with.toLowerCase() === (n.fromUsername || '').toLowerCase();
+  const viewingRoom = n.scope === 'room' && S.view && S.view.type === 'room' && S.view.id === n.roomId;
+  const seenAlready = focused && (viewingDm || viewingRoom || n.kind === 'announce');
   const [title, text] = notifyText(n);
-  const go = () => {
-    window.focus();
-    if (n.scope === 'dm') openDm(n.fromUsername);
-    else if (n.scope === 'room' && n.roomId && !(S.view && S.view.type === 'room' && S.view.id === n.roomId)) joinRoom(n.roomId);
-  };
-  if (!(viewingIt && windowFocused())) toast(title, text, n.kind === 'muted' ? 'warn' : n.kind === 'announce' ? 'warn' : '', go);
-  if (n.kind === 'dm' && !viewingIt) {
+  if (n.kind === 'dm' && !viewingDm) {
     const t = S.dms.find((d) => d.with.toLowerCase() === n.fromUsername.toLowerCase());
     if (t) t.unread = true; else S.dms.unshift({ with: n.fromUsername, displayName: n.from, unread: true });
     renderDms();
   }
-  if (!windowFocused() && 'Notification' in window && Notification.permission === 'granted') {
-    try { const x = new Notification(title, { body: text, tag: 'tc-' + (n.messageId || n.ts) }); x.onclick = () => { go(); x.close(); }; } catch { /* some browsers need a service worker */ }
-  }
-  if (!windowFocused()) { S.unreadTotal += 1; updateTitleCount(); }
+  if (seenAlready) return;
+  // Real OS notification when allowed; otherwise a small in-page toast as a fallback.
+  const shown = await osNotify(title, text, 'tc-' + (n.messageId || n.ts), { scope: n.scope, roomId: n.roomId, from: n.fromUsername });
+  if (!shown) toast(title, text, n.kind === 'muted' || n.kind === 'announce' ? 'warn' : '', () => openFromNotification({ scope: n.scope, roomId: n.roomId, from: n.fromUsername }));
+  if (!focused) { S.unreadTotal += 1; updateTitleCount(); }
 }
 window.addEventListener('focus', () => { S.unreadTotal = 0; updateTitleCount(); });
 
@@ -1078,6 +1203,12 @@ function bindSocket() {
    ===================================================================== */
 function boot() {
   $('#version').textContent = APP_VERSION;
+  registerWorker();
+  try { // lets phones install the site as an app (needed for notifications on iPhone/iPad)
+    const man = { name: 'TerminalChat', short_name: 'TerminalChat', display: 'standalone', start_url: location.href.split('#')[0], background_color: '#131417', theme_color: '#131417',
+      icons: [{ src: $('link[rel=icon]').href, sizes: 'any', type: 'image/svg+xml' }] };
+    document.head.append(h('link', { rel: 'manifest', href: URL.createObjectURL(new Blob([JSON.stringify(man)], { type: 'application/manifest+json' })) }));
+  } catch { /* optional */ }
   if (typeof io === 'undefined') {
     const e = $('#boot-error'); e.textContent = 'Could not load the chat library (socket.io). Check your internet connection and reload.'; e.classList.remove('hidden');
     return;
